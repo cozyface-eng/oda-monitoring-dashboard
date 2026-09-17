@@ -34,26 +34,53 @@ RECEIVER_EMAIL = get_secret("RECEIVER_EMAIL")
 # ==========================================
 
 
-def fetch_google_news(keyword: str, max_results: int = 10) -> list:
-    """구글 뉴스 RSS 수집"""
-    encoded_keyword = urllib.parse.quote(keyword)
-    rss_url = f"https://news.google.com/rss/search?q={encoded_keyword}&hl=ko&gl=KR&ceid=KR:ko"
-    feed = feedparser.parse(rss_url)
+# ==========================================
+# 1. 구글 뉴스 수집 관련 함수
+# ==========================================
+def fetch_google_news(keyword, max_results=10):
+    """구글 뉴스 RSS를 통해 키워드 관련 뉴스 수집"""
+    encoded_kw = requests.utils.quote(keyword)
+    rss_url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
+    
+    try:
+        feed = feedparser.parse(rss_url)
+        news_list = []
+        for entry in feed.entries[:max_results]:
+            news_list.append({
+                "title": entry.get("title", "제목 없음"),
+                "link": entry.get("link", ""),
+                "published": entry.get("published", ""),
+                "source": entry.get("source", {}).get("title", "Google News"),
+                "keyword": keyword
+            })
+        return news_list
+    except Exception as e:
+        print(f"[Google News Exception] 키워드 '{keyword}' 수집 중 예외 발생: {type(e).__name__} - {e}")
+        return []
 
-    results = []
-    for entry in feed.entries[:max_results]:
-        results.append({
-            "title": getattr(entry, "title", "제목 없음"),
-            "link": getattr(entry, "link", ""),
-            "date": getattr(entry, "published", "날짜 미상"),
-        })
-    return results
+
+def fetch_google_news_multi(keywords, max_per_keyword=10):
+    """다중 키워드 구글 뉴스 수집 및 중복 제거"""
+    all_news = []
+    seen_urls = set()
+    
+    for kw in keywords:
+        news_items = fetch_google_news(kw, max_results=max_per_keyword) or []
+        for item in news_items:
+            if isinstance(item, dict) and item.get("link") not in seen_urls:
+                seen_urls.add(item["link"])
+                all_news.append(item)
+                
+    return all_news
 
 
+# ==========================================
+# 2. 나라장터(G2B) 입찰공고 수집 관련 함수 (디버깅 강화)
+# ==========================================
 def fetch_g2b_bids(keyword, max_results=10):
     """
     나라장터 API를 통해 입찰공고 수집
-    - 상세 실패 원인(HTTP Status, 공공데이터포털 Header, Exception)을 로그에 출력하도록 보완
+    - 상세 실패 원인(HTTP Status, 공공데이터포털 Header, Exception)을 로그에 출력
     """
     service_key = os.getenv("G2B_API_KEY") or os.getenv("DATA_GO_KR_API_KEY")
     
@@ -75,19 +102,19 @@ def fetch_g2b_bids(keyword, max_results=10):
     try:
         response = requests.get(url, params=params, timeout=15)
         
-        # 1. HTTP 상태 코드 검증 (200이 아닌 경우 상세 출력)
+        # HTTP 상태 코드 검증
         if response.status_code != 200:
             print(f"[G2B API HTTP Error] Status Code: {response.status_code} | Body: {response.text[:300]}")
             return []
 
-        # 2. 응답 데이터 JSON 파싱
+        # 응답 데이터 JSON 파싱
         try:
             data = response.json()
         except ValueError:
             print(f"[G2B API JSON Parsing Error] 응답이 JSON 형식이 아닙니다: {response.text[:300]}")
             return []
 
-        # 3. 공공데이터포털 Header 에러 코드 검증
+        # 공공데이터포털 Header 에러 코드 검증
         response_body = data.get("response", {})
         header = response_body.get("header", {})
         result_code = header.get("resultCode")
@@ -97,7 +124,7 @@ def fetch_g2b_bids(keyword, max_results=10):
             print(f"[G2B API Service Error] 키워드: '{keyword}' | Code: {result_code} | Msg: {result_msg}")
             return []
 
-        # 4. 아이템 추출
+        # 아이템 추출
         items = response_body.get("body", {}).get("items", [])
         
         if isinstance(items, dict):
@@ -153,72 +180,78 @@ def fetch_g2b_bids_multi(keywords, max_per_keyword=10):
 
 
 # ==========================================
-# 3. Gemini 요약 및 발송 모듈
+# 3. Gemini 요약 함수
 # ==========================================
+def summarize_with_gemini(news_data, bid_data):
+    """Gemini API를 사용하여 뉴스 및 입찰공고 요약 생성"""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "GEMINI_API_KEY가 설정되지 않아 요약을 생성할 수 없습니다."
 
-
-def summarize_with_gemini(
-    news_data: list, bid_data: list, max_retries: int = 5
-) -> str:
-    """Gemini API를 활용한 데이터 브리핑 요약 (503 재시도 적용)"""
-    import time
-    from google import genai
-
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY가 설정되지 않았습니다.")
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    news_text = "\n".join([f"- {n['title']} ({n['source']})" for n in news_data[:10]])
+    bid_text = "\n".join([f"- {b['title']} ({b['agency']})" for b in bid_data[:10]])
 
     prompt = f"""
-    아래는 ODA 및 국제개발협력 관련 최신 수집 데이터입니다.
+    아래 수집된 ODA 관련 정보와 입찰공고를 바탕으로 핵심 요약을 작성해 주세요.
 
-    [수집 뉴스]
-    {news_data}
+    [주요 뉴스]
+    {news_text if news_text else "수집된 뉴스 없음"}
 
-    [수집 입찰/공고]
-    {bid_data}
-
-    위 내용을 바탕으로 핵심 동향을 3~5개 항목으로 요약하여 깔끔한 마크다운 형식으로 작성해 주세요.
+    [주요 입찰공고]
+    {bid_text if bid_text else "수집된 입찰공고 없음"}
     """
 
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.6-flash", contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            if "503" in str(e) or "overloaded" in str(e):
-                if attempt < max_retries - 1:
-                    time.sleep(2**attempt)
-                    continue
-            raise e
-    return "요약 생성에 실패했습니다."
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        return response.text
+    except Exception as e:
+        print(f"[Gemini Exception] 요약 생성 중 오류 발생: {e}")
+        return f"요약 생성 실패: {e}"
 
 
-def send_slack(title: str, text: str):
-    """슬랙 웹훅 발송"""
-    if not SLACK_WEBHOOK_URL:
-        return
-    payload = {"text": f"*{title}*\n\n{text}"}
-    requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
+# ==========================================
+# 4. 슬랙(Slack) 전송 함수
+# ==========================================
+def send_slack_message(summary_text, news_data, bid_data):
+    """슬랙 웹훅을 통해 결과 알림 발송"""
+    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        print("[Slack Error] SLACK_WEBHOOK_URL이 설정되지 않았습니다.")
+        return False
 
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "📢 ODA 모니터링 및 입찰공고 리포트"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*🤖 AI 핵심 요약*\n{summary_text}"
+            }
+        },
+        {"type": "divider"}
+    ]
 
-def send_email(title: str, text: str):
-    """Gmail SMTP 이메일 발송"""
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
+    payload = {"blocks": blocks}
 
-    if not all([SENDER_EMAIL, SENDER_PASSWORD, RECEIVER_EMAIL]):
-        return
-
-    msg = MIMEMultipart()
-    msg["From"] = SENDER_EMAIL
-    msg["To"] = RECEIVER_EMAIL
-    msg["Subject"] = title
-    msg.attach(MIMEText(text, "plain", "utf-8"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.send_message(msg)
+    try:
+        res = requests.post(webhook_url, data=json.dumps(payload), headers={"Content-Type": "application/json"})
+        if res.status_code == 200:
+            print("슬랙 발송 완료")
+            return True
+        else:
+            print(f"[Slack Error] Status: {res.status_code}, Body: {res.text}")
+            return False
+    except Exception as e:
+        print(f"[Slack Exception] 슬랙 발송 중 예외 발생: {e}")
+        return False
