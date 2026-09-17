@@ -70,12 +70,9 @@ def fetch_google_news_multi(keywords, max_per_keyword=10):
 # 3. 나라장터(G2B) 입찰공고 수집 관련 함수
 # ==========================================
 def fetch_g2b_bids(keyword, max_results=10):
-    """
-    나라장터 API를 통해 입찰공고 수집
-    - 상세 실패 원인(HTTP Status, 공공데이터포털 Header, Exception)을 로그에 출력
-    """
+    """나라장터 API를 통해 입찰공고 수집"""
     if not G2B_SERVICE_KEY:
-        print(f"[G2B API Config Error] API 키(G2B_SERVICE_KEY)가 설정되지 않았습니다. Secrets를 확인하세요.")
+        print("[G2B API Config Error] API 키(G2B_SERVICE_KEY)가 설정되지 않았습니다.")
         return []
 
     url = "http://apis.data.go.kr/1230000/BidPublicInfoService02/getBidPblcanInfoSearch01"
@@ -84,27 +81,24 @@ def fetch_g2b_bids(keyword, max_results=10):
         "serviceKey": G2B_SERVICE_KEY,
         "numOfRows": max_results,
         "pageNo": "1",
-        "inptKd": "1",        # 공고명 검색
-        "bidNtceNm": keyword, # 검색 키워드
+        "inptKd": "1",
+        "bidNtceNm": keyword,
         "type": "json"
     }
 
     try:
         response = requests.get(url, params=params, timeout=15)
         
-        # 1. HTTP 상태 코드 검증
         if response.status_code != 200:
             print(f"[G2B API HTTP Error] Status Code: {response.status_code} | Body: {response.text[:300]}")
             return []
 
-        # 2. 응답 데이터 JSON 파싱
         try:
             data = response.json()
         except ValueError:
             print(f"[G2B API JSON Parsing Error] 응답이 JSON 형식이 아닙니다: {response.text[:300]}")
             return []
 
-        # 3. 공공데이터포털 Header 에러 코드 검증
         response_body = data.get("response", {})
         header = response_body.get("header", {})
         result_code = header.get("resultCode")
@@ -114,14 +108,13 @@ def fetch_g2b_bids(keyword, max_results=10):
             print(f"[G2B API Service Error] 키워드: '{keyword}' | Code: {result_code} | Msg: {result_msg}")
             return []
 
-        # 4. 아이템 추출
         items = response_body.get("body", {}).get("items", [])
         
         if isinstance(items, dict):
             items = [items]
 
         if not items:
-            print(f"[G2B API Info] 키워드 '{keyword}' 검색 결과 데이터가 없습니다 (Empty items).")
+            print(f"[G2B API Info] 키워드 '{keyword}' 검색 결과 데이터가 없습니다.")
             return []
 
         bids = []
@@ -136,22 +129,13 @@ def fetch_g2b_bids(keyword, max_results=10):
             
         return bids
 
-    except requests.exceptions.Timeout:
-        print(f"[G2B API Timeout] 키워드 '{keyword}' 요청 중 타임아웃이 발생했습니다.")
-        return []
-    except requests.exceptions.RequestException as req_err:
-        print(f"[G2B API Network Error] 키워드 '{keyword}' 요청 중 네트워크 에러 발생: {req_err}")
-        return []
     except Exception as e:
-        print(f"[G2B API Exception] 키워드 '{keyword}' 수집 중 알 수 없는 예외 발생: {type(e).__name__} - {e}")
+        print(f"[G2B API Exception] 키워드 '{keyword}' 수집 중 예외 발생: {type(e).__name__} - {e}")
         return []
 
 
 def fetch_g2b_bids_multi(keywords, max_per_keyword=10):
-    """
-    다중 키워드 G2B 입찰공고 수집 및 중복 제거
-    - TypeError: 'NoneType' object is not iterable 예방
-    """
+    """다중 키워드 G2B 입찰공고 수집 및 중복 제거"""
     all_bids = []
     seen_urls = set()
 
@@ -194,7 +178,7 @@ def summarize_with_gemini(news_data, bid_data):
         from google import genai
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model="gemini-3.6-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
         return response.text
@@ -231,12 +215,7 @@ def send_slack_message(summary_text, news_data, bid_data):
 
     try:
         res = requests.post(SLACK_WEBHOOK_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"})
-        if res.status_code == 200:
-            print("슬랙 발송 완료")
-            return True
-        else:
-            print(f"[Slack Error] Status: {res.status_code}, Body: {res.text}")
-            return False
+        return res.status_code == 200
     except Exception as e:
         print(f"[Slack Exception] 슬랙 발송 중 예외 발생: {e}")
         return False
