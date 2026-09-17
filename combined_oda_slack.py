@@ -50,141 +50,105 @@ def fetch_google_news(keyword: str, max_results: int = 10) -> list:
     return results
 
 
-def fetch_g2b_bids(
-    keyword: str = "ODA", days_back: int = 14, max_results: int = 10
-) -> list:
-    """나라장터 입찰공고 API 수집 (XML/JSON 통합 지원 및 예외 안전장치)"""
-    now = datetime.now()
-    start_date = (now - timedelta(days=days_back)).strftime("%Y%m%d0000")
-    end_date = now.strftime("%Y%m%d2359")
+def fetch_g2b_bids(keyword, max_results=10):
+    """
+    나라장터 API를 통해 입찰공고 수집
+    - 상세 실패 원인(HTTP Status, 공공데이터포털 Header, Exception)을 로그에 출력하도록 보완
+    """
+    service_key = os.getenv("G2B_API_KEY") or os.getenv("DATA_GO_KR_API_KEY")
+    
+    if not service_key:
+        print(f"[G2B API Config Error] API 키가 설정되지 않았습니다. Secrets/환경변수를 확인하세요.")
+        return []
 
-    raw_key = G2B_SERVICE_KEY or ""
-    if not raw_key:
-        print("[G2B API Warning] G2B_SERVICE_KEY가 설정되지 않았습니다.")
-
-    decoded_key = urllib.parse.unquote(raw_key)
-    encoded_key = urllib.parse.quote(decoded_key)
-    encoded_keyword = urllib.parse.quote(keyword)
-
-    endpoint = "https://apis.data.go.kr/1230000/BidPublicInfoService03/getBidPblcListInfoServcPPSSrch01"
-    full_url = (
-        f"{endpoint}?"
-        f"serviceKey={encoded_key}&"
-        f"numOfRows={max_results}&"
-        f"pageNo=1&"
-        f"inptStartDt={start_date}&"
-        f"inptEndDt={end_date}&"
-        f"bidNtceNm={encoded_keyword}&"
-        f"type=json"
-    )
+    url = "http://apis.data.go.kr/1230000/BidPublicInfoService02/getBidPblcanInfoSearch01"
+    
+    params = {
+        "serviceKey": service_key,
+        "numOfRows": max_results,
+        "pageNo": "1",
+        "inptKd": "1",        # 공고명 검색
+        "bidNtceNm": keyword, # 검색 키워드
+        "type": "json"
+    }
 
     try:
-        response = requests.get(full_url, timeout=10)
-        if response.status_code == 200:
-            res_text = response.text.strip()
+        response = requests.get(url, params=params, timeout=15)
+        
+        # 1. HTTP 상태 코드 검증 (200이 아닌 경우 상세 출력)
+        if response.status_code != 200:
+            print(f"[G2B API HTTP Error] Status Code: {response.status_code} | Body: {response.text[:300]}")
+            return []
 
-            if (
-                "OpenAPI_ServiceResponse" in res_text
-                or "SERVICE_KEY" in res_text
-            ):
-                raise ValueError("G2B Service Key Authentication Error")
-
-            bids = []
-            if res_text.startswith("{") or res_text.startswith("["):
-                data = response.json()
-                items = (
-                    data.get("response", {})
-                    .get("body", {})
-                    .get("items", {})
-                    .get("item", [])
-                )
-                if isinstance(items, dict):
-                    items = [items]
-
-                for item in items:
-                    bids.append({
-                        "title": item.get("bidNtceNm", "제목 없음"),
-                        "agency": item.get("ntceInsttNm")
-                        or item.get("dmanInsttNm", "발주기관 미상"),
-                        "link": item.get(
-                            "bidNtceDtlUrl",
-                            f"https://www.g2b.go.kr:8081/ep/invitation/type1/bidInfoDtl.do?bidNo={item.get('bidNtceNo', '')}",
-                        ),
-                    })
-
-            elif res_text.startswith("<"):
-                root = ET.fromstring(res_text)
-                items = root.findall(".//item")
-                for item in items:
-                    title = item.findtext("bidNtceNm") or "제목 없음"
-                    agency = (
-                        item.findtext("ntceInsttNm")
-                        or item.findtext("dmanInsttNm")
-                        or "발주기관 미상"
-                    )
-                    bid_no = item.findtext("bidNtceNo") or ""
-                    url = (
-                        item.findtext("bidNtceDtlUrl")
-                        or f"https://www.g2b.go.kr:8081/ep/invitation/type1/bidInfoDtl.do?bidNo={bid_no}"
-                    )
-                    bids.append({"title": title, "agency": agency, "link": url})
-
-            if bids:
-                return bids
-
-        raise ValueError("G2B API 결과 없음")
-
-    except Exception as e:
-        print(f"[G2B Fallback 우회 작동] 원인: {e}")
+        # 2. 응답 데이터 JSON 파싱
         try:
-            fallback_query = f"나라장터 {keyword}"
-            fallback_news = fetch_google_news(
-                fallback_query, max_results=max_results
-            )
-            if isinstance(fallback_news, list):
-                return [
-                    {
-                        "title": item.get("title", "제목 없음"),
-                        "agency": f"우회수집({keyword})",
-                        "link": item.get("link", ""),
-                    }
-                    for item in fallback_news
-                    if isinstance(item, dict)
-                ]
-        except Exception:
-            pass
+            data = response.json()
+        except ValueError:
+            print(f"[G2B API JSON Parsing Error] 응답이 JSON 형식이 아닙니다: {response.text[:300]}")
+            return []
+
+        # 3. 공공데이터포털 Header 에러 코드 검증
+        response_body = data.get("response", {})
+        header = response_body.get("header", {})
+        result_code = header.get("resultCode")
+        result_msg = header.get("resultMsg")
+
+        if result_code != "00":
+            print(f"[G2B API Service Error] 키워드: '{keyword}' | Code: {result_code} | Msg: {result_msg}")
+            return []
+
+        # 4. 아이템 추출
+        items = response_body.get("body", {}).get("items", [])
+        
+        if isinstance(items, dict):
+            items = [items]
+
+        if not items:
+            print(f"[G2B API Info] 키워드 '{keyword}' 검색 결과 데이터가 없습니다 (Empty items).")
+            return []
+
+        bids = []
+        for item in items:
+            bids.append({
+                "title": item.get("bidNtceNm", "공고명 없음"),
+                "link": item.get("bidNtceDtlUrl", "https://www.g2b.go.kr"),
+                "agency": item.get("ntceInstNm", "발주기관 미상"),
+                "date": item.get("bidNtceDt", "")[:10],
+                "keyword": keyword
+            })
+            
+        return bids
+
+    except requests.exceptions.Timeout:
+        print(f"[G2B API Timeout] 키워드 '{keyword}' 요청 중 타임아웃이 발생했습니다.")
+        return []
+    except requests.exceptions.RequestException as req_err:
+        print(f"[G2B API Network Error] 키워드 '{keyword}' 요청 중 네트워크 에러 발생: {req_err}")
+        return []
+    except Exception as e:
+        print(f"[G2B API Exception] 키워드 '{keyword}' 수집 중 알 수 없는 예외 발생: {type(e).__name__} - {e}")
         return []
 
 
-def fetch_google_news_multi(keywords: list, max_per_keyword: int = 3) -> list:
-    """여러 키워드로 뉴스를 순회 수집하고 중복 제거"""
-    all_news = []
-    seen_urls = set()
-
-    for kw in keywords:
-        news_list = fetch_google_news(kw, max_results=max_per_keyword)
-        if isinstance(news_list, list):
-            for item in news_list:
-                if isinstance(item, dict) and item.get("link"):
-                    if item["link"] not in seen_urls:
-                        seen_urls.add(item["link"])
-                        all_news.append(item)
-    return all_news
-
-
-def fetch_g2b_bids_multi(keywords: list, max_per_keyword: int = 3) -> list:
-    """여러 키워드로 나라장터 공고를 순회 수집하고 중복 제거"""
+def fetch_g2b_bids_multi(keywords, max_per_keyword=10):
+    """
+    다중 키워드 G2B 입찰공고 수집 및 중복 제거
+    - TypeError: 'NoneType' object is not iterable 방지
+    """
     all_bids = []
     seen_urls = set()
 
     for kw in keywords:
-        bid_list = fetch_g2b_bids(kw, max_results=max_per_keyword)
-        if isinstance(bid_list, list):
-            for item in bid_list:
-                if isinstance(item, dict) and item.get("link"):
-                    if item["link"] not in seen_urls:
-                        seen_urls.add(item["link"])
-                        all_bids.append(item)
+        bid_list = fetch_g2b_bids(kw, max_results=max_per_keyword) or []
+        
+        if not isinstance(bid_list, list):
+            continue
+
+        for item in bid_list:
+            if isinstance(item, dict) and item.get("link") not in seen_urls:
+                seen_urls.add(item["link"])
+                all_bids.append(item)
+
     return all_bids
 
 
