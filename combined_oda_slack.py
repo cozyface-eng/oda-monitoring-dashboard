@@ -160,12 +160,22 @@ def fetch_g2b_bids_multi(keywords, max_per_keyword=10):
 # 4. Gemini 요약 및 발송 함수 (app.py 인터페이스 맞춤)
 # ==========================================
 def summarize_with_gemini(news_data, bid_data, max_retries=3):
-    """Gemini API를 사용하여 뉴스 및 입찰공고 요약 생성 (재시도 로직 포함)"""
+    """Gemini API를 사용하여 뉴스 및 입찰공고 요약 생성.
+
+    quota 초과(429)는 짧은 재시도로 해결되지 않으므로 즉시 사용자 안내를 반환합니다.
+    그 외 일시적 오류만 지수 백오프로 재시도합니다.
+    """
     if not GEMINI_API_KEY:
         return "GEMINI_API_KEY가 설정되지 않아 요약을 생성할 수 없습니다."
 
-    news_text = "\n".join([f"- {n['title']} ({n.get('source', '뉴스')})" for n in news_data[:10]])
-    bid_text = "\n".join([f"- {b['title']} ({b.get('agency', '기관')})" for b in bid_data[:10]])
+    news_text = "\n".join(
+        f"- {n.get('title', '제목 없음')} ({n.get('source', '뉴스')})"
+        for n in news_data[:10]
+    )
+    bid_text = "\n".join(
+        f"- {b.get('title', '공고명 없음')} ({b.get('agency', '기관')})"
+        for b in bid_data[:10]
+    )
 
     prompt = f"""
     아래 수집된 ODA 관련 정보와 입찰공고를 바탕으로 핵심 요약을 작성해 주세요.
@@ -177,24 +187,38 @@ def summarize_with_gemini(news_data, bid_data, max_retries=3):
     {bid_text if bid_text else "수집된 입찰공고 없음"}
     """
 
+    from google import genai
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
     for attempt in range(max_retries):
         try:
-            from google import genai
-            client = genai.Client(api_key=GEMINI_API_KEY)
             response = client.models.generate_content(
                 model="gemini-3.6-flash",
                 contents=prompt,
             )
             return response.text
         except Exception as e:
+            error_text = str(e)
+
+            # 무료 등급 일일 quota 초과는 재시도해도 해결되지 않음
+            if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text:
+                print(f"[Gemini Quota Error] 요청 한도 초과: {e}")
+                return (
+                    "⚠️ Gemini API 사용량 한도를 초과했습니다.\n\n"
+                    "현재 무료 등급의 Gemini 요청 quota를 모두 사용했습니다. "
+                    "잠시 후 quota가 초기화되거나 Gemini API 결제 및 사용량 설정을 "
+                    "확인한 뒤 다시 실행해 주세요."
+                )
+
             if attempt < max_retries - 1:
-                time.sleep(2)
+                time.sleep(2 ** attempt)
                 continue
+
             print(f"[Gemini Exception] 요약 생성 중 오류 발생: {e}")
-            raise e
+            raise
 
 
-def send_slack(title, summary_text):
+ def send_slack(title, summary_text):
     """app.py에서 요구하는 슬랙 발송 함수"""
     if not SLACK_WEBHOOK_URL:
         print("[Slack Error] SLACK_WEBHOOK_URL이 설정되지 않았습니다.")
