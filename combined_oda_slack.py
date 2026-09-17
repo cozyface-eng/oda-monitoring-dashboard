@@ -220,7 +220,7 @@ def summarize_with_gemini(
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt
+                model="gemini-3.6-flash", contents=prompt
             )
             return response.text
         except Exception as e:
