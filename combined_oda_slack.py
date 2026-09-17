@@ -175,20 +175,26 @@ def fetch_g2b_bids(
             )
             raise ValueError("No Bids Found")
 
-    except Exception as e:
+      except Exception as e:
         print(f"[G2B API 수집 실패 -> Fallback 우회 작동] 원인: {e}")
-        fallback_query = f"나라장터 {keyword}"
-        fallback_news = fetch_google_news(
-            fallback_query, max_results=max_results
-        )
-        return [
-            {
-                "title": item["title"],
-                "agency": f"우회수집({keyword})",
-                "link": item["link"],
-            }
-            for item in fallback_news
-        ]
+        try:
+            fallback_query = f"나라장터 {keyword}"
+            fallback_news = fetch_google_news(fallback_query, max_results=max_results)
+            
+            if isinstance(fallback_news, list):
+                return [
+                    {
+                        "title": item.get("title", "제목 없음"),
+                        "agency": f"우회수집({keyword})",
+                        "link": item.get("link", "")
+                    }
+                    for item in fallback_news if isinstance(item, dict)
+                ]
+        except Exception as fb_err:
+            print(f"[G2B Fallback까지 실패]: {fb_err}")
+            
+        # 모든 예외 상황에서도 None 대신 빈 리스트 반환
+        return []
 
 # ==========================================
 # 2-1. 다중 키워드 지원 & 중복 제거 래퍼 함수 (신규 추가)
@@ -211,16 +217,40 @@ def fetch_google_news_multi(keywords: list, max_per_keyword: int = 3) -> list:
 
 
 def fetch_g2b_bids_multi(keywords: list, max_per_keyword: int = 3) -> list:
-    """여러 키워드로 나라장터 공고를 수집하고 URL 기준 중복 제거"""
+    """여러 키워드로 나라장터 공고를 수집하고 URL 기준 중복 제거 (TypeError 방지 방어 코드 적용)"""
     all_bids = []
     seen_urls = set()
 
     for kw in keywords:
         bid_list = fetch_g2b_bids(kw, max_results=max_per_keyword)
+        
+        # bid_list가 None이거나 리스트가 아닌 경우 빈 리스트로 보정
+        if not isinstance(bid_list, list):
+            bid_list = []
+
         for item in bid_list:
-            if item["link"] not in seen_urls:
-                seen_urls.add(item["link"])
-                all_bids.append(item)
+            if isinstance(item, dict) and item.get("link"):
+                if item["link"] not in seen_urls:
+                    seen_urls.add(item["link"])
+                    all_bids.append(item)
+
+    return all_bidsdef fetch_g2b_bids_multi(keywords: list, max_per_keyword: int = 3) -> list:
+    """여러 키워드로 나라장터 공고를 수집하고 URL 기준 중복 제거 (TypeError 방지 방어 코드 적용)"""
+    all_bids = []
+    seen_urls = set()
+
+    for kw in keywords:
+        bid_list = fetch_g2b_bids(kw, max_results=max_per_keyword)
+        
+        # bid_list가 None이거나 리스트가 아닌 경우 빈 리스트로 보정
+        if not isinstance(bid_list, list):
+            bid_list = []
+
+        for item in bid_list:
+            if isinstance(item, dict) and item.get("link"):
+                if item["link"] not in seen_urls:
+                    seen_urls.add(item["link"])
+                    all_bids.append(item)
 
     return all_bids
 
