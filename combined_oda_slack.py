@@ -12,14 +12,28 @@ import requests
 # 1. 설정 정보 (사용자 정보 입력)
 # ==========================================
 import os
+import streamlit as st
 
-# 환경 변수에서 불러오도록 변경 (코드에 직접 입력 X)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
-G2B_SERVICE_KEY = os.getenv("G2B_SERVICE_KEY", "")
-SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")
-SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "")
-RECEIVER_EMAIL = os.getenv("RECEIVER_EMAIL", "")
+
+def get_secret(key: str, default: str = "") -> str:
+    """Streamlit Cloud의 st.secrets와 로컬 os.getenv 모두 지원"""
+    try:
+        # Streamlit 환경일 때
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    # 로컬 또는 일반 파이썬 환경일 때
+    return os.getenv(key, default)
+
+
+# 환경 변수 및 Secrets에서 불러오기
+GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
+SLACK_WEBHOOK_URL = get_secret("SLACK_WEBHOOK_URL")
+G2B_SERVICE_KEY = get_secret("G2B_SERVICE_KEY")
+SENDER_EMAIL = get_secret("SENDER_EMAIL")
+SENDER_PASSWORD = get_secret("SENDER_PASSWORD")
+RECEIVER_EMAIL = get_secret("RECEIVER_EMAIL")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 ENABLE_EMAIL = True
