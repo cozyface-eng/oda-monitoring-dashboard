@@ -36,7 +36,7 @@ def fetch_google_news(keyword, max_results=10):
     """구글 뉴스 RSS를 통해 키워드 관련 뉴스 수집"""
     encoded_kw = requests.utils.quote(keyword)
     rss_url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
-    
+
     try:
         feed = feedparser.parse(rss_url)
         news_list = []
@@ -58,14 +58,14 @@ def fetch_google_news_multi(keywords, max_per_keyword=10):
     """다중 키워드 구글 뉴스 수집 및 중복 제거"""
     all_news = []
     seen_urls = set()
-    
+
     for kw in keywords:
         news_items = fetch_google_news(kw, max_results=max_per_keyword) or []
         for item in news_items:
             if isinstance(item, dict) and item.get("link") not in seen_urls:
                 seen_urls.add(item["link"])
                 all_news.append(item)
-                
+
     return all_news
 
 
@@ -79,7 +79,7 @@ def fetch_g2b_bids(keyword, max_results=10):
         return []
 
     url = "http://apis.data.go.kr/1230000/BidPublicInfoService02/getBidPblcanInfoSearch01"
-    
+
     params = {
         "serviceKey": G2B_SERVICE_KEY,
         "numOfRows": max_results,
@@ -91,7 +91,7 @@ def fetch_g2b_bids(keyword, max_results=10):
 
     try:
         response = requests.get(url, params=params, timeout=15)
-        
+
         if response.status_code != 200:
             print(f"[G2B API HTTP Error] Status Code: {response.status_code} | Body: {response.text[:300]}")
             return []
@@ -112,7 +112,7 @@ def fetch_g2b_bids(keyword, max_results=10):
             return []
 
         items = response_body.get("body", {}).get("items", [])
-        
+
         if isinstance(items, dict):
             items = [items]
 
@@ -129,7 +129,7 @@ def fetch_g2b_bids(keyword, max_results=10):
                 "date": item.get("bidNtceDt", "")[:10],
                 "keyword": keyword
             })
-            
+
         return bids
 
     except Exception as e:
@@ -144,7 +144,7 @@ def fetch_g2b_bids_multi(keywords, max_per_keyword=10):
 
     for kw in keywords:
         bid_list = fetch_g2b_bids(kw, max_results=max_per_keyword) or []
-        
+
         if not isinstance(bid_list, list):
             continue
 
@@ -218,7 +218,7 @@ def summarize_with_gemini(news_data, bid_data, max_retries=3):
             raise
 
 
- def send_slack(title, summary_text):
+def send_slack(title, summary_text):
     """app.py에서 요구하는 슬랙 발송 함수"""
     if not SLACK_WEBHOOK_URL:
         print("[Slack Error] SLACK_WEBHOOK_URL이 설정되지 않았습니다.")
@@ -245,7 +245,11 @@ def summarize_with_gemini(news_data, bid_data, max_retries=3):
     payload = {"blocks": blocks}
 
     try:
-        res = requests.post(SLACK_WEBHOOK_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"})
+        res = requests.post(
+            SLACK_WEBHOOK_URL,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"}
+        )
         return res.status_code == 200
     except Exception as e:
         print(f"[Slack Exception] 슬랙 발송 중 예외 발생: {e}")
