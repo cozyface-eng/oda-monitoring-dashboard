@@ -8,6 +8,7 @@ import feedparser
 from google import genai
 import requests
 
+
 # ==========================================
 # 1. 설정 정보 (사용자 정보 입력)
 # ==========================================
@@ -41,8 +42,10 @@ ENABLE_EMAIL = True
 # ==========================================
 # 2. 데이터 수집 모듈 (RSS & G2B API)
 # ==========================================
+
+
 def fetch_google_news(keyword: str, max_results: int = 10):
-    """구글 뉴스 RSS 수집"""
+    """단일 키워드 기준 구글 뉴스 RSS 수집"""
     encoded_keyword = urllib.parse.quote(keyword)
     rss_url = f"https://news.google.com/rss/search?q={encoded_keyword}&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
@@ -59,16 +62,20 @@ def fetch_google_news(keyword: str, max_results: int = 10):
     return results
 
 
-def fetch_g2b_bids(keyword: str = "ODA", days_back: int = 7, max_results: int = 10):
-    """나라장터 API 시도 및 RSS Fallback 수집"""
+def fetch_g2b_bids(
+    keyword: str = "ODA", days_back: int = 7, max_results: int = 10
+):
+    """단일 키워드 기준 나라장터 API 시도 및 RSS Fallback 수집"""
     now = datetime.now()
     start_date = (now - timedelta(days=days_back)).strftime("%Y%m%d")
     end_date = now.strftime("%Y%m%d")
 
+    encoded_keyword = urllib.parse.quote(keyword)
+
     url = (
         f"https://apis.data.go.kr/1230000/BidPublicInfoService03/getBidPblcListInfoServcPPSSrch01?"
-        f"serviceKey={G2B_SERVICE_KEY}&numOfRows=10&pageNo=1&"
-        f"inptStartDt={start_date}&inptEndDt={end_date}&bidNtceNm={keyword}&type=json"
+        f"serviceKey={G2B_SERVICE_KEY}&numOfRows={max_results}&pageNo=1&"
+        f"inptStartDt={start_date}&inptEndDt={end_date}&bidNtceNm={encoded_keyword}&type=json"
     )
 
     try:
@@ -93,20 +100,58 @@ def fetch_g2b_bids(keyword: str = "ODA", days_back: int = 7, max_results: int = 
                 "link": item.get("bidNtceDtlUrl"),
             }
             for item in items
+            if item.get("bidNtceNm")
         ]
 
     except Exception:
-        # Fallback: 구글 RSS 나라장터 검색
-        fallback_news = fetch_google_news("나라장터 ODA", max_results=3)
+        # Fallback: 전달받은 keyword로 구글 RSS 우회 수집 (하드코딩 수정)
+        fallback_query = f"나라장터 {keyword}"
+        fallback_news = fetch_google_news(
+            fallback_query, max_results=max_results
+        )
         return [
             {
                 "title": item["title"],
-                "agency": "뉴스/공고 우회 수집",
+                "agency": f"뉴스/공고 우회 수집({keyword})",
                 "link": item["link"],
             }
             for item in fallback_news
         ]
 
+
+# ==========================================
+# 2-1. 다중 키워드 지원 & 중복 제거 래퍼 함수 (신규 추가)
+# ==========================================
+
+
+def fetch_google_news_multi(keywords: list, max_per_keyword: int = 3) -> list:
+    """여러 키워드로 뉴스를 수집하고 URL 기준 중복 제거"""
+    all_news = []
+    seen_urls = set()
+
+    for kw in keywords:
+        news_list = fetch_google_news(kw, max_results=max_per_keyword)
+        for item in news_list:
+            if item["link"] not in seen_urls:
+                seen_urls.add(item["link"])
+                all_news.append(item)
+
+    return all_news
+
+
+def fetch_g2b_bids_multi(keywords: list, max_per_keyword: int = 3) -> list:
+    """여러 키워드로 나라장터 공고를 수집하고 URL 기준 중복 제거"""
+    all_bids = []
+    seen_urls = set()
+
+    for kw in keywords:
+        bid_list = fetch_g2b_bids(kw, max_results=max_per_keyword)
+        for item in bid_list:
+            if item["link"] not in seen_urls:
+                seen_urls.add(item["link"])
+                all_bids.append(item)
+
+    return all_bids
 
 # ==========================================
 # 3. Gemini 요약 모듈 (링크 포함 방식 개선)
