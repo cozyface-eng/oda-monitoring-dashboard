@@ -63,28 +63,27 @@ def fetch_google_news(keyword: str, max_results: int = 10):
 
 
 def fetch_g2b_bids(
-    keyword: str = "ODA", days_back: int = 7, max_results: int = 10
+    keyword: str = "ODA", days_back: int = 14, max_results: int = 10
 ):
-    """나라장터 입찰공고 API 수집 (URL 직접 조립 방식 - 이중 인코딩 방지)"""
+    """나라장터 입찰공고 API 수집 (XML/JSON 통합 지원 및 이중인코딩 방지)"""
     now = datetime.now()
     start_date = (now - timedelta(days=days_back)).strftime("%Y%m%d0000")
     end_date = now.strftime("%Y%m%d2359")
 
-    # 1. API 키 검증 및 디코딩 처리
     raw_key = G2B_SERVICE_KEY or ""
     if not raw_key:
-        print("[G2B API] G2B_SERVICE_KEY가 설정되지 않았습니다.")
+        print("[G2B API Error] G2B_SERVICE_KEY가 설정되지 않았습니다.")
         raise ValueError("Missing G2B_SERVICE_KEY")
 
-    # 입력받은 키를 원문(Decoding 상태)으로 변환 후 다시 quote 처리하여 안전한 Encoding 키 생성
+    # 인증키 자동 보정 (Encoding/Decoding 키 모두 대응)
     decoded_key = urllib.parse.unquote(raw_key)
     encoded_key = urllib.parse.quote(decoded_key)
-
-    # 2. 키워드 URL 인코딩
     encoded_keyword = urllib.parse.quote(keyword)
 
-    # 3. URL 직접 생성 (requests params 미사용으로 이중 인코딩 완벽 방지)
+    # 1. 조달청 용역 입찰공고 엔드포인트 URL
     endpoint = "https://apis.data.go.kr/1230000/BidPublicInfoService03/getBidPblcListInfoServcPPSSrch01"
+
+    # URL 직접 조립 (requests params의 키 재인코딩 방지)
     full_url = (
         f"{endpoint}?"
         f"serviceKey={encoded_key}&"
@@ -97,58 +96,87 @@ def fetch_g2b_bids(
     )
 
     try:
-        # params 인자 없이 full_url로 직접 요청
-        response = requests.get(full_url, timeout=10)
+        response = requests.get(full_url, timeout=12)
 
         if response.status_code == 200:
-            res_text = response.text
+            res_text = response.text.strip()
 
-            # 공공데이터포털 에러 응답 분기
+            # 공공데이터포털 인증 실패 XML 응답 처리
             if (
                 "OpenAPI_ServiceResponse" in res_text
-                or "<cmmMsgHeader>" in res_text
                 or "SERVICE_KEY" in res_text
             ):
-                print(
-                    f"[G2B API 오류 응답 내용]: {res_text[:200]}"
-                )  # 에러 원인 출력을 위해 로그 추가
-                raise ValueError("G2B API Service Key Error")
-
-            data = response.json()
-            items = (
-                data.get("response", {})
-                .get("body", {})
-                .get("items", {})
-                .get("item", [])
-            )
-
-            if isinstance(items, dict):
-                items = [items]
+                print(f"[G2B API 인증 오류] 응답 내용: {res_text[:200]}")
+                raise ValueError("G2B Service Key Authentication Error")
 
             bids = []
-            for item in items:
-                title = item.get("bidNtceNm", "제목 없음")
-                agency = item.get("ntceInsttNm") or item.get(
-                    "dmanInsttNm", "발주기관 미상"
-                )
-                bid_no = item.get("bidNtceNo", "")
-                url = item.get(
-                    "bidNtceDtlUrl",
-                    f"https://www.g2b.go.kr:8081/ep/invitation/type1/bidInfoDtl.do?bidNo={bid_no}",
-                )
 
-                bids.append({"title": title, "agency": agency, "link": url})
+            # A. JSON 형식 응답 시도
+            if res_text.startswith("{") or res_text.startswith("["):
+                data = response.json()
+                items = (
+                    data.get("response", {})
+                    .get("body", {})
+                    .get("items", {})
+                    .get("item", [])
+                )
+                if isinstance(items, dict):
+                    items = [items]
+
+                for item in items:
+                    bids.append({
+                        "title": item.get("bidNtceNm", "제목 없음"),
+                        "agency": item.get("ntceInsttNm")
+                        or item.get("dmanInsttNm", "발주기관 미상"),
+                        "link": item.get(
+                            "bidNtceDtlUrl",
+                            f"https://www.g2b.go.kr:8081/ep/invitation/type1/bidInfoDtl.do?bidNo={item.get('bidNtceNo', '')}",
+                        ),
+                    })
+
+            # B. XML 형식 응답 시도 (type=json이 안 먹히는 경우 대응)
+            elif res_text.startswith("<"):
+                root = ET.fromstring(res_text)
+                # 에러 메시지 체크
+                res_code = root.find(".//resultCode")
+                if res_code is not None and res_code.text not in ["00", "0"]:
+                    res_msg = root.find(".//resultMsg")
+                    msg = res_msg.text if res_msg is not None else "Unknown"
+                    print(f"[G2B API 결과 에러] 코드: {res_code.text}, 메시지: {msg}")
+                    raise ValueError(f"G2B Result Error: {msg}")
+
+                items = root.findall(".//item")
+                for item in items:
+                    title = (
+                        item.findtext("bidNtceNm")
+                        or item.findtext("bidNtceNm")
+                        or "제목 없음"
+                    )
+                    agency = (
+                        item.findtext("ntceInsttNm")
+                        or item.findtext("dmanInsttNm")
+                        or "발주기관 미상"
+                    )
+                    bid_no = item.findtext("bidNtceNo") or ""
+                    url = item.findtext(
+                        "bidNtceDtlUrl"
+                    ) or f"https://www.g2b.go.kr:8081/ep/invitation/type1/bidInfoDtl.do?bidNo={bid_no}"
+
+                    bids.append({"title": title, "agency": agency, "link": url})
 
             if bids:
                 print(
-                    f"[G2B API 성공] 키워드 '{keyword}': {len(bids)}건 수집 완료"
+                    f"[G2B API 정상 수집 완료] 키워드: '{keyword}', 건수: {len(bids)}건"
                 )
                 return bids
 
-        raise ValueError("API 반환 데이터 없음")
+            print(
+                f"[G2B API 결과 없음] 최근 {days_back}일 내 '{keyword}' 해당 공고가 없습니다."
+            )
+            raise ValueError("No Bids Found")
 
     except Exception as e:
-        print(f"[G2B Fallback 작동] 원인: {e}")
+        print(f"[G2B API 수집 실패 -> Fallback 우회 작동] 원인: {e}")
         fallback_query = f"나라장터 {keyword}"
         fallback_news = fetch_google_news(
             fallback_query, max_results=max_results
