@@ -1,16 +1,13 @@
 import os
-import urllib.parse
-from datetime import datetime, timedelta
-import xml.etree.ElementTree as ET
-import feedparser
+import json
 import requests
+import feedparser
 import streamlit as st
+from datetime import datetime
 
 # ==========================================
 # 1. 환경 변수 및 Secrets 로드
 # ==========================================
-
-
 def get_secret(key: str, default: str = "") -> str:
     """Streamlit Cloud의 st.secrets와 로컬 os.getenv 모두 지원"""
     try:
@@ -23,19 +20,14 @@ def get_secret(key: str, default: str = "") -> str:
 
 GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
 SLACK_WEBHOOK_URL = get_secret("SLACK_WEBHOOK_URL")
-G2B_SERVICE_KEY = get_secret("G2B_SERVICE_KEY")
+G2B_SERVICE_KEY = get_secret("G2B_SERVICE_KEY") or get_secret("G2B_API_KEY") or get_secret("DATA_GO_KR_API_KEY")
 SENDER_EMAIL = get_secret("SENDER_EMAIL")
 SENDER_PASSWORD = get_secret("SENDER_PASSWORD")
 RECEIVER_EMAIL = get_secret("RECEIVER_EMAIL")
 
 
 # ==========================================
-# 2. 데이터 수집 모듈 (Google News & G2B)
-# ==========================================
-
-
-# ==========================================
-# 1. 구글 뉴스 수집 관련 함수
+# 2. 구글 뉴스 수집 관련 함수
 # ==========================================
 def fetch_google_news(keyword, max_results=10):
     """구글 뉴스 RSS를 통해 키워드 관련 뉴스 수집"""
@@ -75,23 +67,21 @@ def fetch_google_news_multi(keywords, max_per_keyword=10):
 
 
 # ==========================================
-# 2. 나라장터(G2B) 입찰공고 수집 관련 함수 (디버깅 강화)
+# 3. 나라장터(G2B) 입찰공고 수집 관련 함수
 # ==========================================
 def fetch_g2b_bids(keyword, max_results=10):
     """
     나라장터 API를 통해 입찰공고 수집
     - 상세 실패 원인(HTTP Status, 공공데이터포털 Header, Exception)을 로그에 출력
     """
-    service_key = os.getenv("G2B_API_KEY") or os.getenv("DATA_GO_KR_API_KEY")
-    
-    if not service_key:
-        print(f"[G2B API Config Error] API 키가 설정되지 않았습니다. Secrets/환경변수를 확인하세요.")
+    if not G2B_SERVICE_KEY:
+        print(f"[G2B API Config Error] API 키(G2B_SERVICE_KEY)가 설정되지 않았습니다. Secrets를 확인하세요.")
         return []
 
     url = "http://apis.data.go.kr/1230000/BidPublicInfoService02/getBidPblcanInfoSearch01"
     
     params = {
-        "serviceKey": service_key,
+        "serviceKey": G2B_SERVICE_KEY,
         "numOfRows": max_results,
         "pageNo": "1",
         "inptKd": "1",        # 공고명 검색
@@ -102,19 +92,19 @@ def fetch_g2b_bids(keyword, max_results=10):
     try:
         response = requests.get(url, params=params, timeout=15)
         
-        # HTTP 상태 코드 검증
+        # 1. HTTP 상태 코드 검증
         if response.status_code != 200:
             print(f"[G2B API HTTP Error] Status Code: {response.status_code} | Body: {response.text[:300]}")
             return []
 
-        # 응답 데이터 JSON 파싱
+        # 2. 응답 데이터 JSON 파싱
         try:
             data = response.json()
         except ValueError:
             print(f"[G2B API JSON Parsing Error] 응답이 JSON 형식이 아닙니다: {response.text[:300]}")
             return []
 
-        # 공공데이터포털 Header 에러 코드 검증
+        # 3. 공공데이터포털 Header 에러 코드 검증
         response_body = data.get("response", {})
         header = response_body.get("header", {})
         result_code = header.get("resultCode")
@@ -124,7 +114,7 @@ def fetch_g2b_bids(keyword, max_results=10):
             print(f"[G2B API Service Error] 키워드: '{keyword}' | Code: {result_code} | Msg: {result_msg}")
             return []
 
-        # 아이템 추출
+        # 4. 아이템 추출
         items = response_body.get("body", {}).get("items", [])
         
         if isinstance(items, dict):
@@ -160,7 +150,7 @@ def fetch_g2b_bids(keyword, max_results=10):
 def fetch_g2b_bids_multi(keywords, max_per_keyword=10):
     """
     다중 키워드 G2B 입찰공고 수집 및 중복 제거
-    - TypeError: 'NoneType' object is not iterable 방지
+    - TypeError: 'NoneType' object is not iterable 예방
     """
     all_bids = []
     seen_urls = set()
@@ -180,12 +170,11 @@ def fetch_g2b_bids_multi(keywords, max_per_keyword=10):
 
 
 # ==========================================
-# 3. Gemini 요약 함수
+# 4. Gemini 요약 및 슬랙 발송 함수
 # ==========================================
 def summarize_with_gemini(news_data, bid_data):
     """Gemini API를 사용하여 뉴스 및 입찰공고 요약 생성"""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    if not GEMINI_API_KEY:
         return "GEMINI_API_KEY가 설정되지 않아 요약을 생성할 수 없습니다."
 
     news_text = "\n".join([f"- {n['title']} ({n['source']})" for n in news_data[:10]])
@@ -203,9 +192,9 @@ def summarize_with_gemini(news_data, bid_data):
 
     try:
         from google import genai
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt,
         )
         return response.text
@@ -214,13 +203,9 @@ def summarize_with_gemini(news_data, bid_data):
         return f"요약 생성 실패: {e}"
 
 
-# ==========================================
-# 4. 슬랙(Slack) 전송 함수
-# ==========================================
 def send_slack_message(summary_text, news_data, bid_data):
     """슬랙 웹훅을 통해 결과 알림 발송"""
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-    if not webhook_url:
+    if not SLACK_WEBHOOK_URL:
         print("[Slack Error] SLACK_WEBHOOK_URL이 설정되지 않았습니다.")
         return False
 
@@ -245,7 +230,7 @@ def send_slack_message(summary_text, news_data, bid_data):
     payload = {"blocks": blocks}
 
     try:
-        res = requests.post(webhook_url, data=json.dumps(payload), headers={"Content-Type": "application/json"})
+        res = requests.post(SLACK_WEBHOOK_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"})
         if res.status_code == 200:
             print("슬랙 발송 완료")
             return True
