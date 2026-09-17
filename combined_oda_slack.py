@@ -2,8 +2,11 @@ import os
 import json
 import requests
 import feedparser
+import smtplib
+import time
 import streamlit as st
-from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # ==========================================
 # 1. 환경 변수 및 Secrets 로드
@@ -154,15 +157,15 @@ def fetch_g2b_bids_multi(keywords, max_per_keyword=10):
 
 
 # ==========================================
-# 4. Gemini 요약 및 슬랙 발송 함수
+# 4. Gemini 요약 및 발송 함수 (app.py 인터페이스 맞춤)
 # ==========================================
-def summarize_with_gemini(news_data, bid_data):
-    """Gemini API를 사용하여 뉴스 및 입찰공고 요약 생성"""
+def summarize_with_gemini(news_data, bid_data, max_retries=3):
+    """Gemini API를 사용하여 뉴스 및 입찰공고 요약 생성 (재시도 로직 포함)"""
     if not GEMINI_API_KEY:
         return "GEMINI_API_KEY가 설정되지 않아 요약을 생성할 수 없습니다."
 
-    news_text = "\n".join([f"- {n['title']} ({n['source']})" for n in news_data[:10]])
-    bid_text = "\n".join([f"- {b['title']} ({b['agency']})" for b in bid_data[:10]])
+    news_text = "\n".join([f"- {n['title']} ({n.get('source', '뉴스')})" for n in news_data[:10]])
+    bid_text = "\n".join([f"- {b['title']} ({b.get('agency', '기관')})" for b in bid_data[:10]])
 
     prompt = f"""
     아래 수집된 ODA 관련 정보와 입찰공고를 바탕으로 핵심 요약을 작성해 주세요.
@@ -174,21 +177,25 @@ def summarize_with_gemini(news_data, bid_data):
     {bid_text if bid_text else "수집된 입찰공고 없음"}
     """
 
-    try:
-        from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
-        return response.text
-    except Exception as e:
-        print(f"[Gemini Exception] 요약 생성 중 오류 발생: {e}")
-        return f"요약 생성 실패: {e}"
+    for attempt in range(max_retries):
+        try:
+            from google import genai
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=prompt,
+            )
+            return response.text
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            print(f"[Gemini Exception] 요약 생성 중 오류 발생: {e}")
+            raise e
 
 
-def send_slack_message(summary_text, news_data, bid_data):
-    """슬랙 웹훅을 통해 결과 알림 발송"""
+def send_slack(title, summary_text):
+    """app.py에서 요구하는 슬랙 발송 함수"""
     if not SLACK_WEBHOOK_URL:
         print("[Slack Error] SLACK_WEBHOOK_URL이 설정되지 않았습니다.")
         return False
@@ -198,7 +205,7 @@ def send_slack_message(summary_text, news_data, bid_data):
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": "📢 ODA 모니터링 및 입찰공고 리포트"
+                "text": f"📢 {title}"
             }
         },
         {
@@ -218,4 +225,28 @@ def send_slack_message(summary_text, news_data, bid_data):
         return res.status_code == 200
     except Exception as e:
         print(f"[Slack Exception] 슬랙 발송 중 예외 발생: {e}")
+        return False
+
+
+def send_email(subject, content):
+    """app.py에서 요구하는 이메일 발송 함수"""
+    if not SENDER_EMAIL or not SENDER_PASSWORD or not RECEIVER_EMAIL:
+        print("[Email Config Error] 이메일 설정(SENDER_EMAIL/PASSWORD/RECEIVER_EMAIL)이 부족합니다.")
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = RECEIVER_EMAIL
+        msg['Subject'] = subject
+        msg.attach(MIMEText(content, 'plain', 'utf-8'))
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.send_message(msg)
+        server.close()
+        return True
+    except Exception as e:
+        print(f"[Email Exception] 이메일 발송 오류: {e}")
         return False
