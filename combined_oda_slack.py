@@ -65,46 +65,81 @@ def fetch_google_news(keyword: str, max_results: int = 10):
 def fetch_g2b_bids(
     keyword: str = "ODA", days_back: int = 7, max_results: int = 10
 ):
-    """단일 키워드 기준 나라장터 API 시도 및 RSS Fallback 수집"""
+    """나라장터 입찰공고 API 직접 수집 (Encoding/Decoding 키 자동 보정 적용)"""
     now = datetime.now()
-    start_date = (now - timedelta(days=days_back)).strftime("%Y%m%d")
-    end_date = now.strftime("%Y%m%d")
+    start_date = (now - timedelta(days=days_back)).strftime("%Y%m%d0000")
+    end_date = now.strftime("%Y%m%d2359")
 
-    encoded_keyword = urllib.parse.quote(keyword)
+    # 1. 조달청 입찰공고목록 용역조회 엔드포인트
+    endpoint = "https://apis.data.go.kr/1230000/BidPublicInfoService03/getBidPblcListInfoServcPPSSrch01"
 
-    url = (
-        f"https://apis.data.go.kr/1230000/BidPublicInfoService03/getBidPblcListInfoServcPPSSrch01?"
-        f"serviceKey={G2B_SERVICE_KEY}&numOfRows={max_results}&pageNo=1&"
-        f"inptStartDt={start_date}&inptEndDt={end_date}&bidNtceNm={encoded_keyword}&type=json"
-    )
+    # 2. 인증키 디코딩 보정 (Encoding/Decoding 키 모두 대응 가능하도록 처리)
+    raw_key = G2B_SERVICE_KEY or ""
+    # 이미 디코딩된 키라도 unquote를 거치면 원문 형태가 유지됩니다.
+    decoded_key = urllib.parse.unquote(raw_key)
+
+    # 3. API 요청 파라미터 구성 (requests가 자동으로 올바른 인코딩을 수행함)
+    params = {
+        "serviceKey": decoded_key,
+        "numOfRows": str(max_results),
+        "pageNo": "1",
+        "inptStartDt": start_date,
+        "inptEndDt": end_date,
+        "bidNtceNm": keyword,
+        "type": "json",
+    }
 
     try:
-        res = requests.get(url, timeout=10)
-        if "OpenAPI_ServiceResponse" in res.text or "<cmmMsgHeader>" in res.text:
-            raise ValueError("G2B API 서비스 미등록 상태")
+        response = requests.get(endpoint, params=params, timeout=10)
 
-        data = res.json()
-        items = (
-            data.get("response", {})
-            .get("body", {})
-            .get("items", {})
-            .get("item", [])
-        )
-        if isinstance(items, dict):
-            items = [items]
+        if response.status_code == 200:
+            res_text = response.text
 
-        return [
-            {
-                "title": item.get("bidNtceNm"),
-                "agency": item.get("ntceInsttNm"),
-                "link": item.get("bidNtceDtlUrl"),
-            }
-            for item in items
-            if item.get("bidNtceNm")
-        ]
+            # 공공데이터포털 특유의 XML 인증 에러 응답 분기
+            if (
+                "OpenAPI_ServiceResponse" in res_text
+                or "<cmmMsgHeader>" in res_text
+                or "SERVICE_KEY" in res_text
+            ):
+                print(
+                    f"[G2B API 인증 실패] 키워드: '{keyword}' - 인증키 확인 필요."
+                )
+                raise ValueError("G2B API Service Key Error")
 
-    except Exception:
-        # Fallback: 전달받은 keyword로 구글 RSS 우회 수집 (하드코딩 수정)
+            data = response.json()
+            items = (
+                data.get("response", {})
+                .get("body", {})
+                .get("items", {})
+                .get("item", [])
+            )
+
+            # 단건 결과일 경우 리스트로 변환
+            if isinstance(items, dict):
+                items = [items]
+
+            bids = []
+            for item in items:
+                title = item.get("bidNtceNm", "제목 없음")
+                agency = item.get("ntceInsttNm") or item.get(
+                    "dmanInsttNm", "발주기관 미상"
+                )
+                bid_no = item.get("bidNtceNo", "")
+                url = item.get(
+                    "bidNtceDtlUrl",
+                    f"https://www.g2b.go.kr:8081/ep/invitation/type1/bidInfoDtl.do?bidNo={bid_no}",
+                )
+
+                bids.append({"title": title, "agency": agency, "link": url})
+
+            if bids:
+                return bids
+
+        raise ValueError("G2B API 반환 데이터 없음")
+
+    except Exception as e:
+        # Fallback: API 오류 또는 검색 결과가 없을 경우 구글 RSS 우회 수집
+        print(f"[G2B Fallback 작동] 원인: {e}")
         fallback_query = f"나라장터 {keyword}"
         fallback_news = fetch_google_news(
             fallback_query, max_results=max_results
@@ -112,12 +147,11 @@ def fetch_g2b_bids(
         return [
             {
                 "title": item["title"],
-                "agency": f"뉴스/공고 우회 수집({keyword})",
+                "agency": f"우회수집({keyword})",
                 "link": item["link"],
             }
             for item in fallback_news
         ]
-
 
 # ==========================================
 # 2-1. 다중 키워드 지원 & 중복 제거 래퍼 함수 (신규 추가)
