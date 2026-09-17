@@ -112,12 +112,22 @@ with tab2:
     if "news_data" in st.session_state and st.session_state["news_data"]:
         news_df = pd.DataFrame(st.session_state["news_data"])
         
-        # 컬럼명 한글 변경 및 URL 링크 처리
-        news_df = news_df.rename(columns={"title": "제목", "link": "링크", "date": "발행일"})
+        # 수집 함수의 필드명과 화면 표시용 필드명을 모두 지원
+        news_df = news_df.rename(columns={
+            "title": "제목",
+            "headline": "제목",
+            "link": "링크",
+            "url": "링크",
+            "published": "발행일",
+            "date": "발행일",
+            "published_at": "발행일",
+        })
+
+        # 누락된 컬럼은 빈 값으로 채워 앱이 KeyError로 중단되지 않도록 함
+        news_df = news_df.reindex(columns=["제목", "발행일", "링크"])
         
-        # 데이터프레임 내 링크 클릭 가능하도록 출력
         st.dataframe(
-            news_df[["제목", "발행일", "링크"]],
+            news_df,
             column_config={
                 "링크": st.column_config.LinkColumn("원본 링크", display_text="기사 바로가기")
             },
@@ -134,10 +144,17 @@ with tab3:
         bid_df = pd.DataFrame(st.session_state["bid_data"])
         
         # 컬럼명 한글 변경 및 URL 링크 처리
-        bid_df = bid_df.rename(columns={"title": "공고/뉴스 제목", "agency": "발주/수집 기관", "link": "링크"})
+        bid_df = bid_df.rename(columns={
+            "title": "공고/뉴스 제목",
+            "agency": "발주/수집 기관",
+            "link": "링크"
+        })
+
+        # 누락된 컬럼은 빈 값으로 채워 앱이 KeyError로 중단되지 않도록 함
+        bid_df = bid_df.reindex(columns=["공고/뉴스 제목", "발주/수집 기관", "링크"])
         
         st.dataframe(
-            bid_df[["공고/뉴스 제목", "발주/수집 기관", "링크"]],
+            bid_df,
             column_config={
                 "링크": st.column_config.LinkColumn("상세 링크", display_text="공고 바로가기")
             },
